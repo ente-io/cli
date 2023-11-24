@@ -12,7 +12,21 @@ import (
 	"time"
 )
 
-func (c *ClICtrl) Export() error {
+type DevExport struct {
+	SkipVideo     bool
+	MaxSizeInMB   int64
+	ShouldDecrypt bool
+	IncludeHidden bool
+	Dir           string
+	ParallelLimit int
+	Email         string
+}
+
+type ExportParams struct {
+	DevExport *DevExport
+}
+
+func (c *ClICtrl) Export(params *ExportParams) error {
 	accounts, err := c.GetAccounts(context.Background())
 	if err != nil {
 		return err
@@ -22,16 +36,6 @@ func (c *ClICtrl) Export() error {
 		return nil
 	}
 	for _, account := range accounts {
-		log.SetPrefix(fmt.Sprintf("[%s-%s] ", account.App, account.Email))
-		if account.ExportDir == "" {
-			log.Printf("Skip account %s: no export directory configured", account.Email)
-			continue
-		}
-		_, err = internal.ValidateDirForWrite(account.ExportDir)
-		if err != nil {
-			log.Printf("Skip export, error: %v while validing exportDir %s\n", err, account.ExportDir)
-			continue
-		}
 		if account.App == api.AppAuth {
 			log.Printf("Skip account %s: auth export is not supported", account.Email)
 			continue
@@ -39,7 +43,7 @@ func (c *ClICtrl) Export() error {
 		log.Println("start sync")
 		retryCount := 0
 		for {
-			err = c.SyncAccount(account)
+			err = c.SyncAccount(account, params)
 			if err != nil {
 				if model.ShouldRetrySync(err) && retryCount < 20 {
 					retryCount = retryCount + 1
@@ -60,11 +64,30 @@ func (c *ClICtrl) Export() error {
 	return nil
 }
 
-func (c *ClICtrl) SyncAccount(account model.Account) error {
+func (c *ClICtrl) SyncAccount(account model.Account, params *ExportParams) error {
 	secretInfo, err := c.KeyHolder.LoadSecrets(account)
 	if err != nil {
 		return err
 	}
+	dirToValidate := account.ExportDir
+	if params != nil && params.DevExport != nil && params.DevExport.Dir != "" {
+		dirToValidate, _ = internal.ResolvePath(params.DevExport.Dir)
+		if params.DevExport.Email != account.Email {
+			log.Printf("Skip as email mismatch: %s != %s", params.DevExport.Email, account.Email)
+			return nil
+		}
+	}
+	log.SetPrefix(fmt.Sprintf("[%s-%s]", account.App, account.Email))
+	if dirToValidate == "" {
+		log.Printf("Skip account %s: no export directory configured", account.Email)
+		return nil
+	}
+	_, err = internal.ValidateDirForWrite(dirToValidate)
+	if err != nil {
+		log.Printf("Skip export, error: %v while validing exportDir %s\n", err, dirToValidate)
+		return nil
+	}
+
 	ctx := c.buildRequestContext(context.Background(), account)
 	err = createDataBuckets(c.DB, account)
 	if err != nil {
@@ -81,15 +104,24 @@ func (c *ClICtrl) SyncAccount(account model.Account) error {
 		log.Printf("Error fetching files: %s", err)
 		return err
 	}
-	err = c.createLocalFolderForRemoteAlbums(ctx, account)
-	if err != nil {
-		log.Printf("Error creating local folders: %s", err)
-		return err
-	}
-	err = c.syncFiles(ctx, account)
-	if err != nil {
-		log.Printf("Error syncing files: %s", err)
-		return err
+	if params != nil && params.DevExport != nil && params.DevExport.Dir != "" {
+		err = c.syncEncFiles(ctx, account, *params)
+		if err != nil {
+			log.Printf("Error downloading files: %s", err)
+			return err
+		}
+	} else {
+		err = c.createLocalFolderForRemoteAlbums(ctx, account)
+		if err != nil {
+			log.Printf("Error creating local folders: %s", err)
+			return err
+		}
+		log.Printf("Syncing files for local server at %s", account.ExportDir)
+		err = c.syncFiles(ctx, account)
+		if err != nil {
+			log.Printf("Error syncing files: %s", err)
+			return err
+		}
 	}
 	return nil
 }
