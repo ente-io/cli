@@ -146,13 +146,20 @@ func (c *ClICtrl) downloadCache(ctx context.Context, file model.RemoteFile, dir 
 			log.Printf("File already exists %s (%s)", file.GetTitle(), utils.ByteCountDecimal(file.Info.FileSize))
 			return nil
 		} else {
-			log.Printf("File already exists but size mismatch %s (%s)", file.GetTitle(), utils.ByteCountDecimal(file.Info.FileSize))
+			log.Printf("File-%d: Exists  %s but size mismatch  remote: (%s) disk:(%s)",
+				file.ID,
+				file.GetTitle(), utils.ByteCountDecimal(file.Info.FileSize), utils.ByteCountDecimal(stat.Size()))
 		}
 	}
 	log.Printf("Downloading %s (%s)", file.GetTitle(), utils.ByteCountDecimal(file.Info.FileSize))
-	err := c.Client.DownloadFile(ctx, file.ID, downloadPath)
+	fastTempDownloadPath := fmt.Sprintf("%s/%d", c.tempFolder, file.ID)
+	err := c.Client.DownloadFile(ctx, file.ID, fastTempDownloadPath)
 	if err != nil {
 		return fmt.Errorf("error downloading file %d: %w", file.ID, err)
+	}
+	err = moveCrossDevice(fastTempDownloadPath, downloadPath)
+	if err != nil {
+		return err
 	}
 	if !devExport.ShouldDecrypt {
 		return nil
@@ -182,9 +189,14 @@ func (c *ClICtrl) downloadThumCache(ctx context.Context, file model.RemoteFile, 
 		}
 	}
 	log.Printf("[Thumb-%d] Download Thumnail %s (%s)", file.ID, file.GetTitle(), utils.ByteCountDecimal(file.Info.ThumbnailSize))
-	err := c.Client.DownloadThumb(ctx, file.ID, downloadPath)
+	fastTempDownloadPath := fmt.Sprintf("%s/%d.thumb", c.tempFolder, file.ID)
+	err := c.Client.DownloadThumb(ctx, file.ID, fastTempDownloadPath)
 	if err != nil {
 		return fmt.Errorf("error downloading thumbnail %d: %w", file.ID, err)
+	}
+	err = moveCrossDevice(fastTempDownloadPath, downloadPath)
+	if err != nil {
+		return err
 	}
 	if !devExport.ShouldDecrypt {
 		return nil
