@@ -60,15 +60,19 @@ func (c *ClICtrl) syncEncFiles(ctx context.Context, account model.Account, param
 		}()
 	}
 
+	queuedFiles := make(map[int64]bool)
+
 	for i, entry := range entries {
 		if entry.IsDeleted {
 			continue
 		}
-
 		if _, ok := deletedAlbums[entry.AlbumID]; ok {
 			continue
 		}
-
+		if _, ok := queuedFiles[entry.FileID]; ok {
+			continue
+		}
+		queuedFiles[entry.FileID] = true
 		fileBytes, err := c.GetValue(ctx, model.RemoteFiles, []byte(fmt.Sprintf("%d", entry.FileID)))
 		if err != nil {
 			return err
@@ -125,7 +129,7 @@ func (c *ClICtrl) downloadEncrypted(ctx context.Context,
 		log.Printf("Skipping original file, just download thumb video %s", file.GetTitle())
 		return nil
 	}
-	if params.DevExport.MaxSizeInMB >= 0 {
+	if params.DevExport.MaxSizeInMB > 0 {
 		if file.Info.FileSize > (params.DevExport.MaxSizeInMB * 1024 * 1024) {
 			log.Printf("File-%d: %s too large , skipped.. size: %s", file.ID, file.GetTitle(), utils.ByteCountDecimal(file.Info.FileSize))
 			return nil
