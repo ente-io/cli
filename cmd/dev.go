@@ -36,8 +36,8 @@ var devExportCmd = &cobra.Command{
 			dir = parseDir
 		}
 		if parallel <= 0 {
-			log.Printf("parallel param is too low, setting to 4")
-			parallel = 4
+			log.Printf("parallel param is too low, setting to 1")
+			parallel = 1
 		} else if parallel > 10 {
 			log.Printf("parallel param is too high, setting to 10")
 			parallel = 10
