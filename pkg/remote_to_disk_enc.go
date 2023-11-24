@@ -44,15 +44,19 @@ func (c *ClICtrl) syncEncFiles(ctx context.Context, account model.Account, param
 	model.SortAlbumFileEntry(entries)
 	defer utils.TimeTrack(time.Now(), "process_files")
 
-	log.Printf("Setting maxProcs %d", runtime.GOMAXPROCS(param.DevExport.ParallelLimit))
 	var wg sync.WaitGroup
-	downloadCh := make(chan model.RemoteFile, param.DevExport.ParallelLimit) // Limit the number of parallel downloads to 5
+	var channelSize = 1
+	workers := param.DevExport.ParallelLimit
+	log.Printf("Setting maxProcs %d, worker count %d", runtime.GOMAXPROCS(param.DevExport.ParallelLimit), workers)
+	downloadCh := make(chan model.RemoteFile, channelSize) // Limit the number of parallel downloads to 5
 	// Start worker goroutines
-	for i := 0; i < param.DevExport.ParallelLimit; i++ {
+	for i := 0; i < workers; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			c.processDownloads(ctx, downloadCh, param)
+			for entry := range downloadCh {
+				c.processDownloads(ctx, entry, param)
+			}
 		}()
 	}
 
@@ -86,33 +90,25 @@ func (c *ClICtrl) syncEncFiles(ctx context.Context, account model.Account, param
 
 	// Close the download channel to signal workers to stop
 	close(downloadCh)
-
-	// Wait for all workers to finish
 	wg.Wait()
-
 	return nil
 }
 
-func (c *ClICtrl) processDownloads(ctx context.Context, downloadCh <-chan model.RemoteFile, param ExportParams) {
+func (c *ClICtrl) processDownloads(ctx context.Context, entry model.RemoteFile, param ExportParams) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("Recovered from panic: %v", r)
 		}
 	}()
-	for entry := range downloadCh {
-		defer func() {
-			if r := recover(); r != nil {
-				log.Printf("Recovered from panic: %v", r)
-			}
-		}()
-		err := c.downloadEncrypted(ctx, entry, param)
-		if err != nil {
-			if errors.Is(err, model.ErrDecryption) {
-				continue
-			} else {
-				log.Printf("file[%d]: Error downloading file %s: %s", entry.ID, entry.GetTitle(), err)
-				// Handle the error as needed
-			}
+
+	log.Printf("Downloading file %s", entry.GetTitle())
+	err := c.downloadEncrypted(ctx, entry, param)
+	if err != nil {
+		if errors.Is(err, model.ErrDecryption) {
+			log.Printf("file[%d]: Error decrypting file %s: %s", entry.ID, entry.GetTitle(), err)
+		} else {
+			log.Printf("file[%d]: Error downloading file %s: %s", entry.ID, entry.GetTitle(), err)
+			// Handle the error as needed
 		}
 	}
 }
