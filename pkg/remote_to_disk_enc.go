@@ -157,13 +157,15 @@ func (c *ClICtrl) downloadCache(ctx context.Context, file model.RemoteFile, dir 
 	if err != nil {
 		return fmt.Errorf("error downloading file %d: %w", file.ID, err)
 	}
+	if !devExport.ShouldDecrypt {
+		go moveCrossDevice(fastTempDownloadPath, downloadPath)
+		return nil
+	}
 	err = moveCrossDevice(fastTempDownloadPath, downloadPath)
 	if err != nil {
 		return err
 	}
-	if !devExport.ShouldDecrypt {
-		return nil
-	}
+
 	decryptedPath := fmt.Sprintf("%s/%d.decrypted", dir, file.ID)
 	err = crypto.DecryptFile(downloadPath, decryptedPath, file.Key.MustDecrypt(deviceKey), encoding.DecodeBase64(file.FileNonce))
 	if err != nil {
@@ -194,12 +196,13 @@ func (c *ClICtrl) downloadThumCache(ctx context.Context, file model.RemoteFile, 
 	if err != nil {
 		return fmt.Errorf("error downloading thumbnail %d: %w", file.ID, err)
 	}
+	if !devExport.ShouldDecrypt {
+		go moveCrossDevice(fastTempDownloadPath, downloadPath)
+		return nil
+	}
 	err = moveCrossDevice(fastTempDownloadPath, downloadPath)
 	if err != nil {
 		return err
-	}
-	if !devExport.ShouldDecrypt {
-		return nil
 	}
 	decryptedPath := fmt.Sprintf("%s/%d.decrypted", dir, file.ID)
 	err = crypto.DecryptFile(downloadPath, decryptedPath, file.Key.MustDecrypt(deviceKey), encoding.DecodeBase64(file.ThumbnailNonce))
