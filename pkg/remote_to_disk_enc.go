@@ -17,18 +17,32 @@ import (
 	"time"
 )
 
+type dstType string
+
+const (
+	Thumb             dstType = "thumb"
+	File              dstType = "file"
+	DecryptedFile     dstType = "decrypted"
+	DecryptedThumb    dstType = "decryptedThumb"
+	TempThumbDownload dstType = "tempThumbDownload"
+	TempFileDownload  dstType = "tempFileDownload"
+)
+
+const (
+	ThumbDir           = "thumb"
+	DecryptedDir       = "decrypted"
+	PreviousVersionDir = "decrypted/updated"
+)
+
 func (c *ClICtrl) syncEncFiles(ctx context.Context, account model.Account, param ExportParams) error {
 	log.Printf("Starting encrypted download")
 	albums, err := c.getRemoteAlbums(ctx)
 	if err != nil {
 		return err
 	}
-	// create thump dir if not exists
-	thumbDir := filepath.Join(param.DevExport.Dir, "thumb")
-	if _, err := os.Stat(thumbDir); os.IsNotExist(err) {
-		if err = os.MkdirAll(thumbDir, os.ModePerm); err != nil {
-			return err
-		}
+	err2 := _createExportSubDirectories(param)
+	if err2 != nil {
+		return err2
 	}
 	deletedAlbums := make(map[int64]bool)
 	for _, album := range albums {
@@ -98,14 +112,45 @@ func (c *ClICtrl) syncEncFiles(ctx context.Context, account model.Account, param
 	return nil
 }
 
-func (c *ClICtrl) processDownloads(ctx context.Context, entry model.RemoteFile, param ExportParams) {
-	defer func() {
-		if r := recover(); r != nil {
-			log.Printf("Recovered from panic: %v", r)
+func _createExportSubDirectories(param ExportParams) error {
+	// create thump dir if not exists
+	thumbDir := filepath.Join(param.DevExport.Dir, ThumbDir)
+	if _, err := os.Stat(thumbDir); os.IsNotExist(err) {
+		if err = os.MkdirAll(thumbDir, os.ModePerm); err != nil {
+			return err
 		}
-	}()
+	}
+	if param.DevExport.ShouldDecrypt {
+		decryptFileFOlder := filepath.Join(param.DevExport.Dir, DecryptedDir)
+		if _, err := os.Stat(decryptFileFOlder); os.IsNotExist(err) {
+			if err = os.MkdirAll(decryptFileFOlder, os.ModePerm); err != nil {
+				return err
+			}
+		}
+		decryptedThumbDir := filepath.Join(decryptFileFOlder, ThumbDir)
+		if _, err := os.Stat(decryptedThumbDir); os.IsNotExist(err) {
+			if err = os.MkdirAll(decryptedThumbDir, os.ModePerm); err != nil {
+				return err
+			}
+		}
+		// use same directory for both file and thumb
+		oldFileVersionDir := filepath.Join(param.DevExport.Dir, PreviousVersionDir)
+		if _, err := os.Stat(oldFileVersionDir); os.IsNotExist(err) {
+			if err = os.MkdirAll(oldFileVersionDir, os.ModePerm); err != nil {
+				return err
+			}
+		}
 
-	log.Printf("Downloading file %s", entry.GetTitle())
+	}
+	return nil
+}
+
+func getDstPath(file model.RemoteFile, dir string) string {
+	return filepath.Join(dir, file.GetTitle())
+}
+
+func (c *ClICtrl) processDownloads(ctx context.Context, entry model.RemoteFile, param ExportParams) {
+	log.Printf("Progress [file:%d] %s", entry.ID, entry.GetTitle())
 	err := c.downloadEncrypted(ctx, entry, param)
 	if err != nil {
 		if errors.Is(err, model.ErrDecryption) {
@@ -140,18 +185,17 @@ func (c *ClICtrl) downloadEncrypted(ctx context.Context,
 
 func (c *ClICtrl) downloadCache(ctx context.Context, file model.RemoteFile, dir string, deviceKey []byte, devExport *DevExport) error {
 	downloadPath := fmt.Sprintf("%s/%d", dir, file.ID)
-	// check if file exists
+	identifier := fmt.Sprintf("[File:%d] %s", file.ID, file.GetTitle())
+	remoteSize := file.Info.FileSize
 	if stat, err := os.Stat(downloadPath); err == nil {
-		if stat.Size() == file.Info.FileSize {
-			log.Printf("File already exists %s (%s)", file.GetTitle(), utils.ByteCountDecimal(file.Info.FileSize))
+		if stat.Size() == remoteSize {
+			log.Printf("%s already exists(%s)", identifier, utils.ByteCountDecimal(remoteSize))
 			return nil
 		} else {
-			log.Printf("File-%d: Exists  %s but size mismatch  remote: (%s) disk:(%s)",
-				file.ID,
-				file.GetTitle(), utils.ByteCountDecimal(file.Info.FileSize), utils.ByteCountDecimal(stat.Size()))
+			log.Printf("%s exists but size mismatch  remote: (%s) disk:(%s)", identifier, utils.ByteCountDecimal(remoteSize), utils.ByteCountDecimal(stat.Size()))
 		}
 	}
-	log.Printf("Downloading %s (%s)", file.GetTitle(), utils.ByteCountDecimal(file.Info.FileSize))
+	log.Printf("%s downloading (%s)", identifier, utils.ByteCountDecimal(remoteSize))
 	fastTempDownloadPath := fmt.Sprintf("%s/%d", c.tempFolder, file.ID)
 	err := c.Client.DownloadFile(ctx, file.ID, fastTempDownloadPath)
 	if err != nil {
@@ -180,17 +224,19 @@ func (c *ClICtrl) downloadCache(ctx context.Context, file model.RemoteFile, dir 
 }
 
 func (c *ClICtrl) downloadThumCache(ctx context.Context, file model.RemoteFile, dir string, deviceKey []byte, devExport *DevExport) error {
-	dir = fmt.Sprintf("%s/thumb", dir)
-	downloadPath := fmt.Sprintf("%s/%d", dir, file.ID)
+	downloadPath := fmt.Sprintf("%s/%d", fmt.Sprintf("%s/thumb", dir), file.ID)
 	// check if file exists
+	identifier := fmt.Sprintf("[Thum:%d] %s", file.ID, file.GetTitle())
+	remoteSize := file.Info.ThumbnailSize
 	if stat, err := os.Stat(downloadPath); err == nil {
-		if stat.Size() != file.Info.ThumbnailSize {
-			log.Printf(" [Thumb-%d] Thumnail %s exists but size mismatch disk(%s) remote (%s)", file.ID, file.GetTitle(), utils.ByteCountDecimal(stat.Size()), utils.ByteCountDecimal(file.Info.ThumbnailSize))
-		} else {
+		if stat.Size() == remoteSize {
+			log.Printf("%s already exists(%s)", identifier, utils.ByteCountDecimal(remoteSize))
 			return nil
+		} else {
+			log.Printf("%s exists but size mismatch  remote: (%s) disk:(%s)", identifier, utils.ByteCountDecimal(remoteSize), utils.ByteCountDecimal(stat.Size()))
 		}
 	}
-	log.Printf("[Thumb-%d] Download Thumnail %s (%s)", file.ID, file.GetTitle(), utils.ByteCountDecimal(file.Info.ThumbnailSize))
+	log.Printf("%s downloading %s", identifier, utils.ByteCountDecimal(remoteSize))
 	fastTempDownloadPath := fmt.Sprintf("%s/%d.thumb", c.tempFolder, file.ID)
 	err := c.Client.DownloadThumb(ctx, file.ID, fastTempDownloadPath)
 	if err != nil {
@@ -208,10 +254,10 @@ func (c *ClICtrl) downloadThumCache(ctx context.Context, file model.RemoteFile, 
 	err = crypto.DecryptFile(downloadPath, decryptedPath, file.Key.MustDecrypt(deviceKey), encoding.DecodeBase64(file.ThumbnailNonce))
 
 	if err != nil {
-		log.Printf("Error decrypting thumbnail file %d: %s", file.ID, err)
+		log.Printf("%s Error decrypting %d ", identifier, err)
 		return model.ErrDecryption
 	} else {
-		log.Printf("Decrypted Thumnail %s at %s", file.GetTitle(), decryptedPath)
+		log.Printf("%s decrypted  at %s", identifier, decryptedPath)
 		//_ = os.Remove(downloadPath)
 		return err
 	}
