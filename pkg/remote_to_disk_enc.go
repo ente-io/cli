@@ -20,12 +20,10 @@ import (
 type dstType string
 
 const (
-	Thumb             dstType = "thumb"
-	File              dstType = "file"
-	DecryptedFile     dstType = "decrypted"
-	DecryptedThumb    dstType = "decryptedThumb"
-	TempThumbDownload dstType = "tempThumbDownload"
-	TempFileDownload  dstType = "tempFileDownload"
+	Encrypted dstType = "encrypted"
+	Decrypted dstType = "decrypted"
+	Download  dstType = "download"
+	FileJSON  dstType = "fileJson"
 )
 
 const (
@@ -145,12 +143,53 @@ func _createExportSubDirectories(param ExportParams) error {
 	return nil
 }
 
-func getDstPath(file model.RemoteFile, dir string) string {
-	return filepath.Join(dir, file.GetTitle())
+func (c *ClICtrl) getDstPath(file model.RemoteFile,
+	isThumbnail bool,
+	dType dstType) string {
+	switch dType {
+	case Encrypted:
+		if isThumbnail {
+			return fmt.Sprintf("%s/%d", ThumbDir, file.ID)
+		}
+		return fmt.Sprintf("%d", file.ID)
+	case Decrypted:
+		if isThumbnail {
+			return fmt.Sprintf("%s/%s/%d", DecryptedDir, ThumbDir, file.ID)
+		}
+		return fmt.Sprintf("%s/%d", DecryptedDir, file.ID)
+	case FileJSON:
+		return fmt.Sprintf("%s/%d.json", DecryptedDir, file.ID)
+	case Download:
+		if isThumbnail {
+			return fmt.Sprintf("%s/%d.thumb", c.tempFolder, file.ID)
+		}
+		return fmt.Sprintf("%s/%d", c.tempFolder, file.ID)
+	}
+	panic("invalid dstType")
+}
+
+// getTargetForPreviousVersion returns the target file prefix where the previous version of the file should be stored
+func getTargetForPreviousVersion(dir string, file model.RemoteFile) string {
+	startVer := 0
+	for {
+		targetDir := fmt.Sprintf("%s/%d_%d", PreviousVersionDir, file.ID, startVer)
+		// check if file exists
+		if _, err := os.Stat(filepath.Join(dir, targetDir+".json")); err == nil {
+			startVer++
+		} else {
+			log.Printf(fmt.Sprintf("File %s not found", dir+targetDir+".json"))
+			return targetDir
+
+		}
+		if startVer > 10 {
+			panic(fmt.Sprintf("too many versions for file %d, title %s", file.ID, file.GetTitle()))
+		}
+	}
+	panic("should not reach here")
 }
 
 func (c *ClICtrl) processDownloads(ctx context.Context, entry model.RemoteFile, param ExportParams) {
-	log.Printf("Progress [file:%d] %s", entry.ID, entry.GetTitle())
+	//log.Printf("Progress [file:%d] %s", entry.ID, entry.GetTitle())
 	err := c.downloadEncrypted(ctx, entry, param)
 	if err != nil {
 		if errors.Is(err, model.ErrDecryption) {
@@ -185,74 +224,132 @@ func (c *ClICtrl) downloadEncrypted(ctx context.Context,
 
 func (c *ClICtrl) downloadCache(ctx context.Context, file model.RemoteFile, dir string, deviceKey []byte, devExport *DevExport) error {
 	downloadPath := fmt.Sprintf("%s/%d", dir, file.ID)
+	decryptedPath := filepath.Join(dir, c.getDstPath(file, false, Decrypted))
+	jsonPath := filepath.Join(dir, c.getDstPath(file, false, FileJSON))
 	identifier := fmt.Sprintf("[File:%d] %s", file.ID, file.GetTitle())
 	remoteSize := file.Info.FileSize
+	alreadyDownloaded := false
 	if stat, err := os.Stat(downloadPath); err == nil {
 		if stat.Size() == remoteSize {
-			log.Printf("%s already exists(%s)", identifier, utils.ByteCountDecimal(remoteSize))
-			return nil
+			alreadyDownloaded = true
+			if devExport.ShouldDecrypt {
+				if _, err := os.Stat(decryptedPath); err == nil {
+					//log.Printf("%s already  existis and decrypted", identifier)
+					return nil
+				} else {
+					log.Printf("%s exists but not decrypted", identifier)
+				}
+			} else {
+				log.Printf("%s already exists(%s)", identifier, utils.ByteCountDecimal(remoteSize))
+				return nil
+			}
+
 		} else {
 			log.Printf("%s exists but size mismatch  remote: (%s) disk:(%s)", identifier, utils.ByteCountDecimal(remoteSize), utils.ByteCountDecimal(stat.Size()))
 		}
 	}
-	log.Printf("%s downloading (%s)", identifier, utils.ByteCountDecimal(remoteSize))
-	fastTempDownloadPath := fmt.Sprintf("%s/%d", c.tempFolder, file.ID)
-	err := c.Client.DownloadFile(ctx, file.ID, fastTempDownloadPath)
-	if err != nil {
-		return fmt.Errorf("error downloading file %d: %w", file.ID, err)
-	}
-	if !devExport.ShouldDecrypt {
-		go moveCrossDevice(fastTempDownloadPath, downloadPath)
-		return nil
-	}
-	err = moveCrossDevice(fastTempDownloadPath, downloadPath)
-	if err != nil {
-		return err
+	if !alreadyDownloaded {
+		log.Printf("%s downloading (%s)", identifier, utils.ByteCountDecimal(remoteSize))
+		fastTempDownloadPath := fmt.Sprintf("%s/%d", c.tempFolder, file.ID)
+		err := c.Client.DownloadFile(ctx, file.ID, fastTempDownloadPath)
+		if err != nil {
+			return fmt.Errorf("error downloading file %d: %w", file.ID, err)
+		}
+		if !devExport.ShouldDecrypt {
+			go moveCrossDevice(fastTempDownloadPath, downloadPath)
+			return nil
+		}
+		err = moveCrossDevice(fastTempDownloadPath, downloadPath)
+		if err != nil {
+			return err
+		}
 	}
 
-	decryptedPath := fmt.Sprintf("%s/%d.decrypted", dir, file.ID)
-	err = crypto.DecryptFile(downloadPath, decryptedPath, file.Key.MustDecrypt(deviceKey), encoding.DecodeBase64(file.FileNonce))
-	if err != nil {
-		log.Printf("Error decrypting file %d: %s", file.ID, err)
-		return model.ErrDecryption
-	} else {
-		log.Printf("Decrypted file %s at %s", file.GetTitle(), decryptedPath)
-		//_ = os.Remove(downloadPath)
-		return err
+	// check if file exists
+	if _, err := os.Stat(decryptedPath); err == nil {
+		// returns path like dir/decrypted/updated/{fileID}_version
+		previousVerPath := filepath.Join(dir, getTargetForPreviousVersion(dir, file))
+		extension := filepath.Ext(file.GetTitle())
+		if file.GetFileType() == model.LivePhoto {
+			extension = "live_" + extension
+		}
+		err = moveCrossDevice(decryptedPath, fmt.Sprintf("%s%s", previousVerPath, extension))
+		if err != nil {
+			return fmt.Errorf("error moving file %s: %s", decryptedPath, err)
+		}
+		if _, errr := os.Stat(jsonPath); errr == nil {
+			previousVerJsonPath := fmt.Sprintf("%s.json", previousVerPath)
+			err = moveCrossDevice(jsonPath, previousVerJsonPath)
+			if err != nil {
+				return fmt.Errorf("error moving json file %s: %s", jsonPath, err)
+			}
+		}
 	}
+	err := crypto.DecryptFile(downloadPath, decryptedPath, file.Key.MustDecrypt(deviceKey), encoding.DecodeBase64(file.FileNonce))
+	if err != nil {
+		log.Printf("%s error decrypting  %s", identifier, err)
+		return model.ErrDecryption
+	}
+
+	err = writeJSONToFile(jsonPath, file)
+	if err != nil {
+		return fmt.Errorf("error writing json file %s: %w", jsonPath, err)
+	}
+	log.Printf("%s decrypted at %s", identifier, decryptedPath)
+	//_ = os.Remove(downloadPath)
+	return err
 
 }
 
 func (c *ClICtrl) downloadThumCache(ctx context.Context, file model.RemoteFile, dir string, deviceKey []byte, devExport *DevExport) error {
-	downloadPath := fmt.Sprintf("%s/%d", fmt.Sprintf("%s/thumb", dir), file.ID)
+	encThumbPath := filepath.Join(dir, c.getDstPath(file, true, Encrypted))
+	decryptedPath := filepath.Join(dir, c.getDstPath(file, true, Decrypted))
+	alreadyDownloaded := false
 	// check if file exists
 	identifier := fmt.Sprintf("[Thum:%d] %s", file.ID, file.GetTitle())
 	remoteSize := file.Info.ThumbnailSize
-	if stat, err := os.Stat(downloadPath); err == nil {
+	if stat, err := os.Stat(encThumbPath); err == nil {
 		if stat.Size() == remoteSize {
-			log.Printf("%s already exists(%s)", identifier, utils.ByteCountDecimal(remoteSize))
-			return nil
+			alreadyDownloaded = true
+			if devExport.ShouldDecrypt {
+				if _, err := os.Stat(decryptedPath); err == nil {
+					//log.Printf("%s already  existis and decrypted", identifier)
+					return nil
+				} else {
+					log.Printf("%s exists but not decrypted", identifier)
+				}
+			} else {
+				log.Printf("%s already exists(%s)", identifier, utils.ByteCountDecimal(remoteSize))
+				return nil
+			}
 		} else {
 			log.Printf("%s exists but size mismatch  remote: (%s) disk:(%s)", identifier, utils.ByteCountDecimal(remoteSize), utils.ByteCountDecimal(stat.Size()))
 		}
 	}
-	log.Printf("%s downloading %s", identifier, utils.ByteCountDecimal(remoteSize))
-	fastTempDownloadPath := fmt.Sprintf("%s/%d.thumb", c.tempFolder, file.ID)
-	err := c.Client.DownloadThumb(ctx, file.ID, fastTempDownloadPath)
-	if err != nil {
-		return fmt.Errorf("error downloading thumbnail %d: %w", file.ID, err)
+	if !alreadyDownloaded {
+		log.Printf("%s downloading %s", identifier, utils.ByteCountDecimal(remoteSize))
+		fastTempDownloadPath := fmt.Sprintf("%s/%d.thumb", c.tempFolder, file.ID)
+		err := c.Client.DownloadThumb(ctx, file.ID, fastTempDownloadPath)
+		if err != nil {
+			return fmt.Errorf("error downloading thumbnail %d: %w", file.ID, err)
+		}
+		if !devExport.ShouldDecrypt {
+			go moveCrossDevice(fastTempDownloadPath, encThumbPath)
+			return nil
+		}
+		err = moveCrossDevice(fastTempDownloadPath, encThumbPath)
+		if err != nil {
+			return err
+		}
 	}
-	if !devExport.ShouldDecrypt {
-		go moveCrossDevice(fastTempDownloadPath, downloadPath)
-		return nil
+	if _, err := os.Stat(decryptedPath); err == nil {
+		previousVerPath := filepath.Join(dir, getTargetForPreviousVersion(dir, file)) + "_thumb.jpg"
+		err = moveCrossDevice(decryptedPath, previousVerPath)
+		if err != nil {
+			return fmt.Errorf("error moving file %s: %s", decryptedPath, err)
+		}
 	}
-	err = moveCrossDevice(fastTempDownloadPath, downloadPath)
-	if err != nil {
-		return err
-	}
-	decryptedPath := fmt.Sprintf("%s/%d.decrypted", dir, file.ID)
-	err = crypto.DecryptFile(downloadPath, decryptedPath, file.Key.MustDecrypt(deviceKey), encoding.DecodeBase64(file.ThumbnailNonce))
-
+	err := crypto.DecryptFile(encThumbPath, decryptedPath, file.Key.MustDecrypt(deviceKey), encoding.DecodeBase64(file.ThumbnailNonce))
 	if err != nil {
 		log.Printf("%s Error decrypting %d ", identifier, err)
 		return model.ErrDecryption
