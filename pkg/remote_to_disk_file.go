@@ -1,6 +1,7 @@
 package pkg
 
 import (
+	"archive/zip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -70,14 +71,20 @@ func (c *ClICtrl) syncFiles(ctx context.Context, account model.Account) error {
 			if err != nil {
 				if errors.Is(err, model.ErrDecryption) {
 					continue
+				} else if existingEntry.IsLivePhoto() && errors.Is(err, zip.ErrFormat) {
+					log.Printf(fmt.Sprintf("err processing live photo %s (%d), %s", existingEntry.GetTitle(), existingEntry.ID, err.Error()))
+					continue
+				} else if existingEntry.IsLivePhoto() && errors.Is(err, model.ErrLiveZip) {
+					continue
 				} else {
 					return err
 				}
 			}
 		} else {
-			log.Fatalf("remoteFile %d not found in remoteFiles", entry.FileID)
+			log.Fatalf("File %d not found in remote", entry.FileID)
 		}
 	}
+
 	return nil
 }
 
@@ -133,23 +140,31 @@ func (c *ClICtrl) downloadEntry(ctx context.Context,
 			if err != nil {
 				return err
 			}
-			imageExtn := filepath.Ext(imagePath)
-			videoExtn := filepath.Ext(videoPath)
-			imageFileName := diskInfo.GenerateUniqueFileName(baseFileName, imageExtn)
-			videoFileName := diskInfo.GenerateUniqueFileName(baseFileName, videoExtn)
-			imageFilePath := filepath.Join(diskInfo.ExportRoot, diskInfo.AlbumMeta.FolderName, imageFileName)
-			videoFilePath := filepath.Join(diskInfo.ExportRoot, diskInfo.AlbumMeta.FolderName, videoFileName)
-			// move the decrypt file to filePath
-			err = Move(imagePath, imageFilePath)
-			if err != nil {
-				return err
+			if imagePath == "" && videoPath == "" {
+				log.Printf("imagePath %s, videoPath %s", imagePath, videoPath)
+				return model.ErrLiveZip
 			}
-			err = Move(videoPath, videoFilePath)
-			if err != nil {
-				return err
+			if imagePath != "" {
+				imageExtn := filepath.Ext(imagePath)
+				imageFileName := diskInfo.GenerateUniqueFileName(baseFileName, imageExtn)
+				imageFilePath := filepath.Join(diskInfo.ExportRoot, diskInfo.AlbumMeta.FolderName, imageFileName)
+				moveErr := Move(imagePath, imageFilePath)
+				if moveErr != nil {
+					return moveErr
+				}
+				fileDiskMetadata.AddFileName(imageFileName)
 			}
-			fileDiskMetadata.AddFileName(imageFileName)
-			fileDiskMetadata.AddFileName(videoFileName)
+			if videoPath == "" {
+				videoExtn := filepath.Ext(videoPath)
+				videoFileName := diskInfo.GenerateUniqueFileName(baseFileName, videoExtn)
+				videoFilePath := filepath.Join(diskInfo.ExportRoot, diskInfo.AlbumMeta.FolderName, videoFileName)
+				// move the decrypt file to filePath
+				moveErr := Move(videoPath, videoFilePath)
+				if moveErr != nil {
+					return moveErr
+				}
+				fileDiskMetadata.AddFileName(videoFileName)
+			}
 		} else {
 			fileName := diskInfo.GenerateUniqueFileName(baseFileName, extension)
 			filePath := filepath.Join(diskInfo.ExportRoot, diskInfo.AlbumMeta.FolderName, fileName)
